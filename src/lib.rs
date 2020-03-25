@@ -29,9 +29,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Representation of a single cell in a property.
 #[derive(Debug, Clone, PartialEq)]
-pub enum PropertyValue {
+pub enum Cell {
     /// A reference to an identification.
-    Reference(String),
+    Ref(String),
     /// A single 32-bit cell.
     Cell(u32),
 }
@@ -56,7 +56,7 @@ pub struct DeviceTree {
 #[derive(Debug)]
 struct Property {
     name: u32,
-    value: Vec<PropertyValue>,
+    value: Vec<Cell>,
 }
 
 #[derive(Debug)]
@@ -82,14 +82,14 @@ impl Node {
     }
 
     fn set_phandle(&mut self, name: u32, phandle: Phandle) {
-        self.set_property(name, vec![PropertyValue::Cell(phandle)]);
+        self.set_property(name, vec![Cell::Cell(phandle)]);
     }
 
-    fn set_property(&mut self, name: u32, value: Vec<PropertyValue>) {
+    fn set_property(&mut self, name: u32, value: Vec<Cell>) {
         self.properties.push(Property { name, value })
     }
 
-    fn get_property(&self, name: u32) -> Result<Vec<PropertyValue>> {
+    fn get_property(&self, name: u32) -> Result<Vec<Cell>> {
         for p in self.properties.iter() {
             if p.name == name {
                 return Ok(p.value.clone());
@@ -188,7 +188,7 @@ impl DeviceTree {
     }
 
     /// Insert a propery to the device tree node.
-    pub fn set_property(&mut self, node: NodeHandle, p: &str, v: Vec<PropertyValue>) -> Result<()> {
+    pub fn set_property(&mut self, node: NodeHandle, p: &str, v: Vec<Cell>) -> Result<()> {
         if !self.node_exist(node) {
             return Err(Error::NoSuchNode);
         }
@@ -199,7 +199,7 @@ impl DeviceTree {
     }
 
     /// Returns the value of a node's property.
-    pub fn get_property(&self, node: NodeHandle, p: &str) -> Result<Vec<PropertyValue>> {
+    pub fn get_property(&self, node: NodeHandle, p: &str) -> Result<Vec<Cell>> {
         if !self.node_exist(node) {
             return Err(Error::NoSuchNode);
         }
@@ -219,13 +219,13 @@ mod tests {
         let root = tree.root();
         let node = tree.alloc_node(root, "cpus").unwrap();
         tree.set_ident(node, "controller").unwrap();
-        tree.set_property(node, "#address-cell", vec![PropertyValue::Cell(0x2)])
+        tree.set_property(node, "#address-cell", vec![Cell::Cell(0x2)])
             .unwrap();
 
         assert!(tree.get_property(node, "no-exist").is_err());
         assert_eq!(
             tree.get_property(node, "#address-cell").unwrap(),
-            vec![PropertyValue::Cell(0x2)]
+            vec![Cell::Cell(0x2)]
         );
     }
 }

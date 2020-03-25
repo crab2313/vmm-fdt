@@ -1,4 +1,4 @@
-use vmm_fdt::{DeviceTree, PropertyValue, Result};
+use vmm_fdt::{DeviceTree, Cell, Result};
 
 fn generate() -> Result<()> {
     let mut fdt = DeviceTree::new();
@@ -8,7 +8,7 @@ fn generate() -> Result<()> {
     fdt.set_property(
         node,
         "interrupt-parent",
-        vec![PropertyValue::Reference("gic".to_string())],
+        vec![Cell::Ref("gic".to_string())],
     )?;
 
     Ok(())
