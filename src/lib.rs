@@ -125,7 +125,7 @@ impl DeviceTree {
     pub fn new() -> DeviceTree {
         let mut arena = Arena::new();
         // the name of root node should not be used
-        let root = arena.insert(Node::new("root"));
+        let root = arena.insert(Node::new(""));
         DeviceTree {
             root,
             arena,
