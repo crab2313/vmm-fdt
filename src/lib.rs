@@ -55,6 +55,7 @@ pub struct DeviceTree {
 
     // memory reservation block
     reserved: Vec<ReserveEntry>,
+    boot_cpuid: u32,
 }
 
 #[derive(Debug)]
@@ -133,13 +134,24 @@ impl DeviceTree {
             str_map: HashMap::new(),
             next_strid: 0,
             reserved: vec![],
+            boot_cpuid: 0,
         }
     }
 
-    /// add an entry in memory reservation block
+    /// Add an entry in memory reservation block.
     pub fn reserve_memory(&mut self, address: u64, size: u64) {
         // TODO validate the reservation block
         self.reserved.push(ReserveEntry { address, size });
+    }
+
+    /// Set the `boot_cpuid_phys` field in the device tree header.
+    pub fn set_boot_cpuid(&mut self, cpuid: u32) {
+        self.boot_cpuid = cpuid;
+    }
+
+    /// Get the `boot_cpuid_phys` field in the device tree header.
+    pub fn boot_cpuid(&mut self) -> u32 {
+        self.boot_cpuid
     }
 
     /// Allocate a new tree node and returns its `NodeHandle`.
@@ -238,7 +250,7 @@ impl DeviceTree {
         node.get_property(strid)
     }
 
-    /// Generate a DTB blob
+    /// Generate a DTB blob.
     pub fn to_dtb<T: Seek + Write>(&self, buffer: &mut T) -> Result<()> {
         let mut str_offset: HashMap<u32, u32> = HashMap::new();
         let mut offset = 0;
@@ -249,7 +261,46 @@ impl DeviceTree {
             offset += str.len() as u32 + 1;
         }
 
-        // Write headers last
+        // do not left free space after the header
+        buffer.seek(SeekFrom::Start(40))?;
+
+        // memory reservation block generation
+        align_to(buffer, 8)?;
+        let off_mem_rsvmap = buffer.seek(SeekFrom::Current(0))? as u32;
+        for r in &self.reserved {
+            buffer.write_u64::<BigEndian>(r.address)?;
+            buffer.write_u64::<BigEndian>(r.size)?;
+        }
+        // mark the end of memory reservation block
+        buffer.write_u64::<BigEndian>(0)?;
+        buffer.write_u64::<BigEndian>(0)?;
+
+        // structure block generation
+        align_to(buffer, 4)?;
+        let off_dt_struct = buffer.seek(SeekFrom::Current(0))? as u32;
+        self.write_node(self.root(), buffer, &str_offset)?;
+        align_to(buffer, 4)?;
+        buffer.write_u32::<BigEndian>(FDT_END)?;
+        let size_dt_struct = buffer.seek(SeekFrom::Current(0))? as u32 - off_dt_struct;
+
+        // strings block generation
+        // strings block does not has alignment requirement
+        let mut size_dt_strings = 0;
+        let pos = buffer.seek(SeekFrom::Current(0))?;
+        let off_dt_strings = pos as u32;
+        for (s, id) in &self.str_map {
+            let offset = *str_offset.get(id).unwrap();
+            let end = offset + s.len() as u32 + 1;
+            if end > size_dt_strings {
+                size_dt_strings = end;
+            }
+
+            buffer.seek(SeekFrom::Start(pos + offset as u64))?;
+            buffer.write(s.as_bytes())?;
+            buffer.write_u8(0)?; // null terminator
+        }
+
+        // fill the device tree header
         //
         // struct fdt_header {
         //      uint32_t magic;
@@ -264,42 +315,19 @@ impl DeviceTree {
         //      uint32_t size_dt_struct;
         // };
 
-        // do not left free space after the header
-        buffer.seek(SeekFrom::Start(40))?;
+        buffer.seek(SeekFrom::Start(0))?;
 
-        // memory reservation block generation
-        align_to(buffer, 8)?;
-        for r in &self.reserved {
-            buffer.write_u64::<BigEndian>(r.address)?;
-            buffer.write_u64::<BigEndian>(r.size)?;
-        }
-        // mark the end of memory reservation block
-        buffer.write_u64::<BigEndian>(0)?;
-        buffer.write_u64::<BigEndian>(0)?;
+        buffer.write_u32::<BigEndian>(0xd00dfeed)?; // magic
+        buffer.write_u32::<BigEndian>(off_dt_strings + size_dt_strings)?; // totalsize
+        buffer.write_u32::<BigEndian>(off_dt_struct)?; // off_dt_struct
+        buffer.write_u32::<BigEndian>(off_dt_strings)?; // off_dt_strings
+        buffer.write_u32::<BigEndian>(off_mem_rsvmap)?; // off_mem_rsvmap
+        buffer.write_u32::<BigEndian>(17)?; // version
+        buffer.write_u32::<BigEndian>(16)?; // last_comp_version
+        buffer.write_u32::<BigEndian>(self.boot_cpuid)?; // boot_cpuid_phys
+        buffer.write_u32::<BigEndian>(size_dt_strings)?; // size_dt_strings
+        buffer.write_u32::<BigEndian>(size_dt_struct)?; // size_dt_struct;
 
-        // structure block generation
-        align_to(buffer, 4)?;
-        self.write_node(self.root(), buffer, &str_offset)?;
-        align_to(buffer, 4)?;
-        buffer.write_u32::<BigEndian>(FDT_END)?;
-
-        // strings block generation
-        // strings block does not has alignment requirement
-        let mut size_strings = 0;
-        let pos = buffer.seek(SeekFrom::Current(0))?;
-        for (s, id) in &self.str_map {
-            let offset = *str_offset.get(id).unwrap();
-            let end = offset + s.len() as u32 + 1;
-            if end > size_strings {
-                size_strings = end;
-            }
-
-            buffer.seek(SeekFrom::Start(pos + offset as u64))?;
-            buffer.write(s.as_bytes())?;
-            buffer.write_u8(0)?; // null terminator
-        }
-
-        align_to(buffer, 4)?;
         Ok(())
     }
 
