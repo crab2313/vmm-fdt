@@ -14,6 +14,8 @@ pub enum Error {
     NoSuchNode,
     /// The property is not exist in the device tree node.
     NoSuchProperty,
+    /// The identification is used by another node already.
+    IdentConflict,
     /// A wrapper of std::io::Error
     IoError(std::io::Error),
 }
@@ -287,6 +289,11 @@ impl DeviceTree {
         if !self.node_exist(node) {
             return Err(Error::NoSuchNode);
         }
+
+        if self.get_phandle(ident).is_some() {
+            return Err(Error::IdentConflict);
+        }
+
         let strid = self.alloc_strid("phandle");
         let phandle = self.alloc_phandle(ident);
         let node = self.arena.get_mut(node.0).ok_or(Error::NoSuchNode)?;
@@ -491,6 +498,8 @@ mod tests {
             tree.get_property(node, "#address-cell").unwrap(),
             cells![0x2]
         );
+
+        assert!(tree.set_ident(node, "controller").is_err());
     }
 
     #[test]
