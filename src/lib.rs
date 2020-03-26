@@ -229,7 +229,7 @@ impl DeviceTree {
     }
 
     /// Get the `boot_cpuid_phys` field in the device tree header.
-    pub fn boot_cpuid(&mut self) -> u32 {
+    pub fn boot_cpuid(&self) -> u32 {
         self.boot_cpuid
     }
 
@@ -500,6 +500,9 @@ mod tests {
         );
 
         assert!(tree.set_ident(node, "controller").is_err());
+
+        tree.set_boot_cpuid(0x101);
+        assert_eq!(tree.boot_cpuid(), 0x101);
     }
 
     #[test]
