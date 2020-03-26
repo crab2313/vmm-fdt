@@ -130,7 +130,7 @@ impl DeviceTree {
             root,
             arena,
             ident_map: HashMap::new(),
-            next_phandle: 0,
+            next_phandle: 1,
             str_map: HashMap::new(),
             next_strid: 0,
             reserved: vec![],
