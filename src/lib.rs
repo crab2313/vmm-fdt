@@ -52,6 +52,15 @@ pub struct DeviceTree {
 
     str_map: HashMap<String, u32>,
     next_strid: u32,
+
+    // memory reservation block
+    reserved: Vec<ReserveEntry>,
+}
+
+#[derive(Debug)]
+struct ReserveEntry {
+    address: u64,
+    size: u64,
 }
 
 #[derive(Debug)]
@@ -123,7 +132,14 @@ impl DeviceTree {
             next_phandle: 0,
             str_map: HashMap::new(),
             next_strid: 0,
+            reserved: vec![],
         }
+    }
+
+    /// add an entry in memory reservation block
+    pub fn reserve_memory(&mut self, address: u64, size: u64) {
+        // TODO validate the reservation block
+        self.reserved.push(ReserveEntry { address, size });
     }
 
     /// Allocate a new tree node and returns its `NodeHandle`.
@@ -251,11 +267,39 @@ impl DeviceTree {
         // do not left free space after the header
         buffer.seek(SeekFrom::Start(40))?;
 
-        // TODO reserved block
-        self.write_node(self.root(), buffer, &str_offset)?;
+        // memory reservation block generation
+        align_to(buffer, 8)?;
+        for r in &self.reserved {
+            buffer.write_u64::<BigEndian>(r.address)?;
+            buffer.write_u64::<BigEndian>(r.size)?;
+        }
+        // mark the end of memory reservation block
+        buffer.write_u64::<BigEndian>(0)?;
+        buffer.write_u64::<BigEndian>(0)?;
 
+        // structure block generation
+        align_to(buffer, 4)?;
+        self.write_node(self.root(), buffer, &str_offset)?;
         align_to(buffer, 4)?;
         buffer.write_u32::<BigEndian>(FDT_END)?;
+
+        // strings block generation
+        // strings block does not has alignment requirement
+        let mut size_strings = 0;
+        let pos = buffer.seek(SeekFrom::Current(0))?;
+        for (s, id) in &self.str_map {
+            let offset = *str_offset.get(id).unwrap();
+            let end = offset + s.len() as u32 + 1;
+            if end > size_strings {
+                size_strings = end;
+            }
+
+            buffer.seek(SeekFrom::Start(pos + offset as u64))?;
+            buffer.write(s.as_bytes())?;
+            buffer.write_u8(0)?; // null terminator
+        }
+
+        align_to(buffer, 4)?;
         Ok(())
     }
 
@@ -337,8 +381,12 @@ mod tests {
     #[test]
     fn generate() {
         let mut tree = DeviceTree::new();
+        tree.reserve_memory(0x0, 0x100000);
+
         let node = tree.alloc_node(tree.root(), "interrupt").unwrap();
         tree.set_ident(node, "gic").unwrap();
+        tree.set_property(node, "reg", vec![Cell::Cell(0x0), Cell::Cell(0x4000_0000)])
+            .unwrap();
 
         let mut buffer = Cursor::new(vec![0; 0x200000]);
         tree.to_dtb(&mut buffer).unwrap();
