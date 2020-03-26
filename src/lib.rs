@@ -2,18 +2,11 @@
 
 //! A simple flatten device tree (FDT) generator.
 
+use byteorder::{BigEndian, WriteBytesExt};
 use generational_arena::{Arena, Index};
 
-/// Token type defined by specification
-#[allow(dead_code)]
-#[repr(u32)]
-enum Token {
-    BeginNode = 0x1,
-    EndNode = 0x2,
-    Prop = 0x3,
-    Nop = 0x4,
-    End = 0x9,
-}
+use std::io::prelude::*;
+use std::io::SeekFrom;
 
 /// Core error type used in this crate.
 #[derive(Debug)]
@@ -22,6 +15,14 @@ pub enum Error {
     NoSuchNode,
     /// The property is not exist in the device tree node.
     NoSuchProperty,
+    /// A wrapper of std::io::Error
+    IoError(std::io::Error),
+}
+
+impl From<std::io::Error> for Error {
+    fn from(error: std::io::Error) -> Error {
+        Error::IoError(error)
+    }
 }
 
 /// Result type wrapper for this crate.
@@ -103,6 +104,12 @@ impl Node {
 #[derive(Debug, Clone, Copy)]
 pub struct NodeHandle(Index);
 
+impl From<&Index> for NodeHandle {
+    fn from(index: &Index) -> NodeHandle {
+        NodeHandle(*index)
+    }
+}
+
 impl DeviceTree {
     /// Create a new device tree.
     pub fn new() -> DeviceTree {
@@ -142,6 +149,13 @@ impl DeviceTree {
         self.next_phandle += 1;
         self.ident_map.insert(String::from(ident), phandle);
         phandle
+    }
+
+    fn get_phandle(&self, ident: &str) -> Option<Phandle> {
+        match self.ident_map.get(ident) {
+            None => None,
+            Some(&p) => Some(p),
+        }
     }
 
     fn alloc_strid(&mut self, str: &str) -> u32 {
@@ -207,11 +221,102 @@ impl DeviceTree {
         let node = self.arena.get(node.0).ok_or(Error::NoSuchNode)?;
         node.get_property(strid)
     }
+
+    /// Generate a DTB blob
+    pub fn to_dtb<T: Seek + Write>(&self, buffer: &mut T) -> Result<()> {
+        let mut str_offset: HashMap<u32, u32> = HashMap::new();
+        let mut offset = 0;
+
+        // construct the string table first
+        for (str, id) in &self.str_map {
+            str_offset.insert(*id, offset);
+            offset += str.len() as u32 + 1;
+        }
+
+        // Write headers last
+        //
+        // struct fdt_header {
+        //      uint32_t magic;
+        //      uint32_t totalsize;
+        //      uint32_t off_dt_struct;
+        //      uint32_t off_dt_strings;
+        //      uint32_t off_mem_rsvmap;
+        //      uint32_t version;
+        //      uint32_t last_comp_version;
+        //      uint32_t boot_cpuid_phys;
+        //      uint32_t size_dt_strings;
+        //      uint32_t size_dt_struct;
+        // };
+
+        // do not left free space after the header
+        buffer.seek(SeekFrom::Start(40))?;
+
+        // TODO reserved block
+        self.write_node(self.root(), buffer, &str_offset)?;
+
+        align_to(buffer, 4)?;
+        buffer.write_u32::<BigEndian>(FDT_END)?;
+        Ok(())
+    }
+
+    fn write_node<T: Seek + Write>(
+        &self,
+        node: NodeHandle,
+        buffer: &mut T,
+        str_offset: &HashMap<u32, u32>,
+    ) -> Result<()> {
+        assert_eq!(buffer.seek(SeekFrom::Current(0))? & 0x3, 0);
+        let node = self.arena.get(node.0).ok_or(Error::NoSuchNode)?;
+
+        buffer.write_u32::<BigEndian>(FDT_BEGIN_NODE)?;
+        buffer.write(node.name.as_bytes())?;
+        buffer.write_u8(0x0).unwrap(); // null terminator of the string
+        align_to(buffer, 4)?;
+
+        // write the properties
+        for prop in &node.properties {
+            buffer.write_u32::<BigEndian>(FDT_PROP)?;
+            buffer.write_u32::<BigEndian>(prop.value.len() as u32 * 4)?;
+            buffer.write_u32::<BigEndian>(*str_offset.get(&prop.name).unwrap())?;
+            for v in &prop.value {
+                let cell = match v {
+                    Cell::Cell(c) => *c,
+                    Cell::Ref(r) => self.get_phandle(r).unwrap(),
+                };
+
+                buffer.write_u32::<BigEndian>(cell)?;
+            }
+            align_to(buffer, 4)?;
+        }
+
+        // write child node
+        for child in &node.subnodes {
+            self.write_node(child.into(), buffer, str_offset)?;
+        }
+
+        buffer.write_u32::<BigEndian>(FDT_END_NODE).unwrap();
+        Ok(())
+    }
 }
+
+fn align_to<T: Seek>(buffer: &mut T, align: u64) -> Result<()> {
+    let off = (!buffer.seek(SeekFrom::Current(0))? + 1) & (align - 1);
+    buffer.seek(SeekFrom::Current(off as i64))?;
+    Ok(())
+}
+
+/// Token type defined by specification
+const FDT_BEGIN_NODE: u32 = 0x0000_0001;
+const FDT_END_NODE: u32 = 0x0000_0002;
+const FDT_PROP: u32 = 0x0000_0003;
+#[allow(dead_code)] // It should be used by the parser
+const FDT_NOP: u32 = 0x0000_0004;
+const FDT_END: u32 = 0x0000_0009;
 
 #[cfg(test)]
 mod tests {
     use crate::*;
+    use std::io::Cursor;
 
     #[test]
     fn tree_op() {
@@ -227,5 +332,27 @@ mod tests {
             tree.get_property(node, "#address-cell").unwrap(),
             vec![Cell::Cell(0x2)]
         );
+    }
+
+    #[test]
+    fn generate() {
+        let mut tree = DeviceTree::new();
+        let node = tree.alloc_node(tree.root(), "interrupt").unwrap();
+        tree.set_ident(node, "gic").unwrap();
+
+        let mut buffer = Cursor::new(vec![0; 0x200000]);
+        tree.to_dtb(&mut buffer).unwrap();
+    }
+
+    #[test]
+    fn helper() {
+        let mut buffer = Cursor::new(vec![0; 0x100]);
+        buffer.write_u8(0xff).unwrap();
+        align_to(&mut buffer, 4).unwrap();
+        assert_eq!(buffer.position(), 4);
+
+        buffer.write_u32::<BigEndian>(0x123456).unwrap();
+        align_to(&mut buffer, 4).unwrap();
+        assert_eq!(buffer.position(), 8);
     }
 }
