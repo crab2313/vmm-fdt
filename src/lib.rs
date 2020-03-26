@@ -92,6 +92,9 @@ macro_rules! cells {
 /// match bytes {
 ///     Value::Bytes(b) => {
 ///         assert_eq!(b[0], 0x61);
+///         assert_eq!(b[2], 0x0);
+///         assert_eq!(b[3], 0x63);
+///         assert_eq!(b[4], 0x0);
 ///     },
 ///     Value::Cells(_) => panic!("wrong formats"),
 /// }
