@@ -37,6 +37,81 @@ pub enum Cell {
     Cell(u32),
 }
 
+/// Representation of the value from a property
+#[derive(Debug, Clone, PartialEq)]
+pub enum Value {
+    /// A list of 32-bit cells.
+    Cells(Vec<Cell>),
+    /// A array of raw bytes.
+    Bytes(Vec<u8>),
+}
+
+impl From<u32> for Cell {
+    fn from(cell: u32) -> Cell {
+        Cell::Cell(cell)
+    }
+}
+
+impl From<&str> for Cell {
+    fn from(str: &str) -> Cell {
+        Cell::Ref(String::from(str))
+    }
+}
+
+/// A helper to ease the cells' creation.
+///
+/// # Examples
+/// ```
+/// use vmm_fdt::{cells, Cell, Value};
+///
+/// let cells = cells![0x2, "gic"];
+/// assert_eq!(cells, Value::Cells(vec![Cell::Cell(0x2), Cell::Ref("gic".to_string())]));
+/// ```
+#[macro_export]
+macro_rules! cells {
+    [ $( $x:expr ),* ] => {
+        {
+            use $crate::{Value, Cell};
+            let mut temp_vec: Vec<Cell> = Vec::new();
+            $(
+                temp_vec.push($x.into());
+            )*
+            Value::Cells(temp_vec)
+        }
+    };
+}
+
+/// A helper to convert a list of string to raw bytes.
+///
+/// Examples
+///
+/// ```
+/// use vmm_fdt::{strings, Value};
+///
+/// let bytes = strings!["ab", "c"];
+///
+/// match bytes {
+///     Value::Bytes(b) => {
+///         assert_eq!(b[0], 0x61);
+///     },
+///     Value::Cells(_) => panic!("wrong formats"),
+/// }
+/// ```
+#[macro_export]
+macro_rules! strings {
+    [ $( $x:expr ),* ] => {
+        {
+            use $crate::Value;
+            let mut temp_vec: Vec<u8> = Vec::new();
+            $(
+                temp_vec.extend($x.as_bytes());
+                temp_vec.push(0);
+            )*
+            Value::Bytes(temp_vec)
+        }
+    };
+}
+
 type Phandle = u32;
 use std::collections::HashMap;
 
@@ -67,7 +142,7 @@ struct ReserveEntry {
 #[derive(Debug)]
 struct Property {
     name: u32,
-    value: Vec<Cell>,
+    value: Value,
 }
 
 #[derive(Debug)]
@@ -93,14 +168,14 @@ impl Node {
     }
 
     fn set_phandle(&mut self, name: u32, phandle: Phandle) {
-        self.set_property(name, vec![Cell::Cell(phandle)]);
+        self.set_property(name, cells![phandle]);
     }
 
-    fn set_property(&mut self, name: u32, value: Vec<Cell>) {
+    fn set_property(&mut self, name: u32, value: Value) {
         self.properties.push(Property { name, value })
     }
 
-    fn get_property(&self, name: u32) -> Result<Vec<Cell>> {
+    fn get_property(&self, name: u32) -> Result<Value> {
         for p in self.properties.iter() {
             if p.name == name {
                 return Ok(p.value.clone());
@@ -230,7 +305,7 @@ impl DeviceTree {
     }
 
     /// Insert a propery to the device tree node.
-    pub fn set_property(&mut self, node: NodeHandle, p: &str, v: Vec<Cell>) -> Result<()> {
+    pub fn set_property(&mut self, node: NodeHandle, p: &str, v: Value) -> Result<()> {
         if !self.node_exist(node) {
             return Err(Error::NoSuchNode);
         }
@@ -241,7 +316,7 @@ impl DeviceTree {
     }
 
     /// Returns the value of a node's property.
-    pub fn get_property(&self, node: NodeHandle, p: &str) -> Result<Vec<Cell>> {
+    pub fn get_property(&self, node: NodeHandle, p: &str) -> Result<Value> {
         if !self.node_exist(node) {
             return Err(Error::NoSuchNode);
         }
@@ -348,16 +423,26 @@ impl DeviceTree {
         // write the properties
         for prop in &node.properties {
             buffer.write_u32::<BigEndian>(FDT_PROP)?;
-            buffer.write_u32::<BigEndian>(prop.value.len() as u32 * 4)?;
+            buffer.write_u32::<BigEndian>(match &prop.value {
+                Value::Cells(c) => c.len() as u32 * 4,
+                Value::Bytes(b) => b.len() as u32,
+            })?;
             buffer.write_u32::<BigEndian>(*str_offset.get(&prop.name).unwrap())?;
-            for v in &prop.value {
-                let cell = match v {
-                    Cell::Cell(c) => *c,
-                    Cell::Ref(r) => self.get_phandle(r).unwrap(),
-                };
 
-                buffer.write_u32::<BigEndian>(cell)?;
-            }
+            match &prop.value {
+                Value::Cells(v) => {
+                    for cell in v {
+                        buffer.write_u32::<BigEndian>(match cell {
+                            Cell::Cell(c) => *c,
+                            Cell::Ref(r) => self.get_phandle(r).unwrap(),
+                        })?;
+                    }
+                }
+                Value::Bytes(v) => {
+                    buffer.write(v.as_ref())?;
+                }
+            };
+
             align_to(buffer, 4)?;
         }
 
@@ -396,13 +481,13 @@ mod tests {
         let root = tree.root();
         let node = tree.alloc_node(root, "cpus").unwrap();
         tree.set_ident(node, "controller").unwrap();
-        tree.set_property(node, "#address-cell", vec![Cell::Cell(0x2)])
+        tree.set_property(node, "#address-cell", cells![0x2])
             .unwrap();
 
         assert!(tree.get_property(node, "no-exist").is_err());
         assert_eq!(
             tree.get_property(node, "#address-cell").unwrap(),
-            vec![Cell::Cell(0x2)]
+            cells![0x2]
         );
     }
 
@@ -413,7 +498,7 @@ mod tests {
 
         let node = tree.alloc_node(tree.root(), "interrupt").unwrap();
         tree.set_ident(node, "gic").unwrap();
-        tree.set_property(node, "reg", vec![Cell::Cell(0x0), Cell::Cell(0x4000_0000)])
+        tree.set_property(node, "reg", cells![0x0, 0x4000_0000])
             .unwrap();
 
         let mut buffer = Cursor::new(vec![0; 0x200000]);
