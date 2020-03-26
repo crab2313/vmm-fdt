@@ -6,4 +6,3 @@ edition = "2018"
 
 [dependencies]
 generational-arena = "0.2.7"
-byteorder = "1"

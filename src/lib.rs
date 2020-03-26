@@ -2,7 +2,6 @@
 
 //! A simple flatten device tree (FDT) generator.
 
-use byteorder::{BigEndian, WriteBytesExt};
 use generational_arena::{Arena, Index};
 
 use std::io::prelude::*;
@@ -343,19 +342,19 @@ impl DeviceTree {
         align_to(buffer, 8)?;
         let off_mem_rsvmap = buffer.seek(SeekFrom::Current(0))? as u32;
         for r in &self.reserved {
-            buffer.write_u64::<BigEndian>(r.address)?;
-            buffer.write_u64::<BigEndian>(r.size)?;
+            buffer.write(&r.address.to_be_bytes())?;
+            buffer.write(&r.size.to_be_bytes())?;
         }
         // mark the end of memory reservation block
-        buffer.write_u64::<BigEndian>(0)?;
-        buffer.write_u64::<BigEndian>(0)?;
+        buffer.write(&0u64.to_be_bytes())?;
+        buffer.write(&0u64.to_be_bytes())?;
 
         // structure block generation
         align_to(buffer, 4)?;
         let off_dt_struct = buffer.seek(SeekFrom::Current(0))? as u32;
         self.write_node(self.root(), buffer, &str_offset)?;
         align_to(buffer, 4)?;
-        buffer.write_u32::<BigEndian>(FDT_END)?;
+        buffer.write(&u32::to_be_bytes(FDT_END))?;
         let size_dt_struct = buffer.seek(SeekFrom::Current(0))? as u32 - off_dt_struct;
 
         // strings block generation
@@ -372,7 +371,7 @@ impl DeviceTree {
 
             buffer.seek(SeekFrom::Start(pos + offset as u64))?;
             buffer.write(s.as_bytes())?;
-            buffer.write_u8(0)?; // null terminator
+            buffer.write(&[0x0])?; // null terminator
         }
 
         // fill the device tree header
@@ -392,16 +391,16 @@ impl DeviceTree {
 
         buffer.seek(SeekFrom::Start(0))?;
 
-        buffer.write_u32::<BigEndian>(0xd00dfeed)?; // magic
-        buffer.write_u32::<BigEndian>(off_dt_strings + size_dt_strings)?; // totalsize
-        buffer.write_u32::<BigEndian>(off_dt_struct)?; // off_dt_struct
-        buffer.write_u32::<BigEndian>(off_dt_strings)?; // off_dt_strings
-        buffer.write_u32::<BigEndian>(off_mem_rsvmap)?; // off_mem_rsvmap
-        buffer.write_u32::<BigEndian>(17)?; // version
-        buffer.write_u32::<BigEndian>(16)?; // last_comp_version
-        buffer.write_u32::<BigEndian>(self.boot_cpuid)?; // boot_cpuid_phys
-        buffer.write_u32::<BigEndian>(size_dt_strings)?; // size_dt_strings
-        buffer.write_u32::<BigEndian>(size_dt_struct)?; // size_dt_struct;
+        buffer.write(&u32::to_be_bytes(0xd00dfeed))?; // magic
+        buffer.write(&u32::to_be_bytes(off_dt_strings + size_dt_strings))?; // totalsize
+        buffer.write(&u32::to_be_bytes(off_dt_struct))?; // off_dt_struct
+        buffer.write(&u32::to_be_bytes(off_dt_strings))?; // off_dt_strings
+        buffer.write(&u32::to_be_bytes(off_mem_rsvmap))?; // off_mem_rsvmap
+        buffer.write(&u32::to_be_bytes(17))?; // version
+        buffer.write(&u32::to_be_bytes(16))?; // last_comp_version
+        buffer.write(&u32::to_be_bytes(self.boot_cpuid))?; // boot_cpuid_phys
+        buffer.write(&u32::to_be_bytes(size_dt_strings))?; // size_dt_strings
+        buffer.write(&u32::to_be_bytes(size_dt_struct))?; // size_dt_struct;
 
         Ok(())
     }
@@ -415,27 +414,27 @@ impl DeviceTree {
         assert_eq!(buffer.seek(SeekFrom::Current(0))? & 0x3, 0);
         let node = self.arena.get(node.0).ok_or(Error::NoSuchNode)?;
 
-        buffer.write_u32::<BigEndian>(FDT_BEGIN_NODE)?;
+        buffer.write(&u32::to_be_bytes(FDT_BEGIN_NODE))?;
         buffer.write(node.name.as_bytes())?;
-        buffer.write_u8(0x0).unwrap(); // null terminator of the string
+        buffer.write(&[0x0])?; // null terminator of the string
         align_to(buffer, 4)?;
 
         // write the properties
         for prop in &node.properties {
-            buffer.write_u32::<BigEndian>(FDT_PROP)?;
-            buffer.write_u32::<BigEndian>(match &prop.value {
+            buffer.write(&u32::to_be_bytes(FDT_PROP))?;
+            buffer.write(&u32::to_be_bytes(match &prop.value {
                 Value::Cells(c) => c.len() as u32 * 4,
                 Value::Bytes(b) => b.len() as u32,
-            })?;
-            buffer.write_u32::<BigEndian>(*str_offset.get(&prop.name).unwrap())?;
+            }))?;
+            buffer.write(&u32::to_be_bytes(*str_offset.get(&prop.name).unwrap()))?;
 
             match &prop.value {
                 Value::Cells(v) => {
                     for cell in v {
-                        buffer.write_u32::<BigEndian>(match cell {
+                        buffer.write(&u32::to_be_bytes(match cell {
                             Cell::Cell(c) => *c,
                             Cell::Ref(r) => self.get_phandle(r).unwrap(),
-                        })?;
+                        }))?;
                     }
                 }
                 Value::Bytes(v) => {
@@ -451,7 +450,7 @@ impl DeviceTree {
             self.write_node(child.into(), buffer, str_offset)?;
         }
 
-        buffer.write_u32::<BigEndian>(FDT_END_NODE).unwrap();
+        buffer.write(&u32::to_be_bytes(FDT_END_NODE))?;
         Ok(())
     }
 }
@@ -508,11 +507,11 @@ mod tests {
     #[test]
     fn helper() {
         let mut buffer = Cursor::new(vec![0; 0x100]);
-        buffer.write_u8(0xff).unwrap();
+        buffer.write(&[0xff]).unwrap();
         align_to(&mut buffer, 4).unwrap();
         assert_eq!(buffer.position(), 4);
 
-        buffer.write_u32::<BigEndian>(0x123456).unwrap();
+        buffer.write(&u32::to_be_bytes(0x123456)).unwrap();
         align_to(&mut buffer, 4).unwrap();
         assert_eq!(buffer.position(), 8);
     }
