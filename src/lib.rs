@@ -5,9 +5,9 @@
 
 use generational_arena::{Arena, Index};
 
+use std::convert::{TryFrom, TryInto};
 use std::io::prelude::*;
 use std::io::SeekFrom;
-use std::convert::{TryInto, TryFrom};
 
 /// Core error type used in this crate.
 #[derive(Debug)]
@@ -441,16 +441,14 @@ impl DeviceTree {
 
     /// Allocate a new tree node and returns its `NodeHandle`.
     pub fn alloc_node(&mut self, parent: NodeHandle, name: &str) -> Result<NodeHandle> {
-        let arena = &mut self.arena;
-
-        if !arena.contains(parent.0) {
+        if !self.node_exist(parent) {
             return Err(Error::NoSuchNode);
         }
 
         let mut node = Node::new(name);
         node.parent = Some(parent.0);
-        let index = arena.insert(node);
-        let pn = arena.get_mut(parent.0).ok_or(Error::NoSuchNode)?;
+        let index = self.arena.insert(node);
+        let pn = self.get_mut(parent)?;
 
         pn.subnodes.push(index);
         Ok(NodeHandle(index))
@@ -504,7 +502,7 @@ impl DeviceTree {
 
         let strid = self.alloc_strid("phandle");
         let phandle = self.alloc_phandle(ident);
-        let node = self.arena.get_mut(node.0).ok_or(Error::NoSuchNode)?;
+        let node = self.get_mut(node)?;
         node.set_ident(ident);
         node.set_phandle(strid, phandle);
         Ok(())
@@ -521,13 +519,22 @@ impl DeviceTree {
         self.arena.contains(node.0)
     }
 
+    fn get(&self, node: NodeHandle) -> Result<&Node> {
+        self.arena.get(node.0).ok_or(Error::NoSuchNode)
+    }
+
+    fn get_mut(&mut self, node: NodeHandle) -> Result<&mut Node> {
+        self.arena.get_mut(node.0).ok_or(Error::NoSuchNode)
+    }
+
     /// Insert a propery to the device tree node.
     pub fn set_property(&mut self, node: NodeHandle, p: &str, v: Values) -> Result<()> {
         if !self.node_exist(node) {
             return Err(Error::NoSuchNode);
         }
+        // do not allocate a new string id if there is not such a node
         let strid = self.alloc_strid(p);
-        let node = self.arena.get_mut(node.0).ok_or(Error::NoSuchNode)?;
+        let node = self.get_mut(node)?;
 
         if p == "#address-cells" || p == "#size-cells" {
             let size = u32::try_from(&v)?;
@@ -545,19 +552,12 @@ impl DeviceTree {
     /// Return a node's name. The name will be extended as `name@address` when
     /// `reg` is exist as a property of the node.
     pub fn node_name(&self, node: NodeHandle) -> Result<String> {
-        if !self.node_exist(node) {
-            return Err(Error::NoSuchNode);
-        }
-
-        let reg = self.get_property(node, "reg");
-        let node = self.arena.get(node.0).ok_or(Error::NoSuchNode)?;
+        let handle = node;
+        let node = self.get(node)?;
+        let reg = self.get_property(handle, "reg");
 
         if let (Ok(reg), Some(parent)) = (reg, node.parent) {
-            let size = self
-                .arena
-                .get(parent)
-                .ok_or(Error::NoSuchNode)?
-                .address_cells();
+            let size = self.get(NodeHandle(parent))?.address_cells();
             let addr = match size {
                 1 => reg.first_u32()? as u64,
                 2 => reg.first_u64()?,
@@ -571,11 +571,8 @@ impl DeviceTree {
 
     /// Returns the value of a node's property.
     pub fn get_property(&self, node: NodeHandle, p: &str) -> Result<Values> {
-        if !self.node_exist(node) {
-            return Err(Error::NoSuchNode);
-        }
+        let node = self.get(node)?;
         let strid = self.get_strid(p).ok_or(Error::NoSuchProperty)?;
-        let node = self.arena.get(node.0).ok_or(Error::NoSuchNode)?;
         node.get_property(strid)
     }
 
@@ -668,7 +665,7 @@ impl DeviceTree {
     ) -> Result<()> {
         assert_eq!(buffer.seek(SeekFrom::Current(0))? & 0x3, 0);
         let name = self.node_name(node)?;
-        let node = self.arena.get(node.0).ok_or(Error::NoSuchNode)?;
+        let node = self.get(node)?;
 
         buffer.write(&u32::to_be_bytes(FDT_BEGIN_NODE))?;
         buffer.write(name.as_bytes())?;
