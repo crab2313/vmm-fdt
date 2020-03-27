@@ -1,6 +1,6 @@
 #![deny(missing_docs)]
 
-//! A simple flatten device tree (FDT) generator. See the `examples` directory
+//! A simple flattened device tree (FDT) generator. See the `examples` directory
 //! in this crate for a full list of examples.
 
 use generational_arena::{Arena, Index};
@@ -65,14 +65,77 @@ impl From<&str> for Cell {
     }
 }
 
-/// A helper to ease the cells' creation.
+impl From<&str> for Value {
+    fn from(str: &str) -> Value {
+        Value::Bytes(Vec::from(str.as_bytes()))
+    }
+}
+
+/// A helper to combine several values for a property.
+///
+/// # Examples
+///
+/// ```
+/// use vmm_fdt::{values, cells, strings, byte_string};
+///
+/// let a = values![cells![0x1, "hello"]];
+/// let b = values![byte_string![1, 2, 3, 4]];
+/// let c = values![strings!["hello"]];
+/// let d = values![cells![0x1, 0x4], strings!["hello"]];
+/// ```
+#[macro_export]
+macro_rules! values {
+    [ $( $x:expr ),* ] => {
+        {
+            use $crate::Value;
+            let mut temp_vec: Vec<Value> = vec![];
+            $(
+                temp_vec.append(&mut $x);
+            )*
+            temp_vec
+        }
+    };
+}
+
+/// A helper to construct byte string.
+///
+/// # Examples
+///
+/// ```
+/// use vmm_fdt::{Value, byte_string};
+///
+/// let bytes = byte_string![0x22, 0x5, 0x6];
+///
+/// match &bytes[0] {
+///     Value::Bytes(b) => {
+///         assert_eq!(b.len(), 3);
+///         assert_eq!(b[2], 0x6);
+///     },
+///     Value::Cells(_) => panic!("wrong format"),
+/// }
+/// ```
+#[macro_export]
+macro_rules! byte_string {
+    [ $( $x:expr ),* ] => {
+        {
+            use $crate::Value;
+            let mut temp_vec: Vec<u8> = Vec::new();
+            $(
+                temp_vec.push($x);
+            )*
+            vec![Value::Bytes(temp_vec)]
+        }
+    };
+}
+
+/// A helper to construct a list of 32-bit cells.
 ///
 /// # Examples
 /// ```
 /// use vmm_fdt::{cells, Cell, Value};
 ///
 /// let cells = cells![0x2, "gic"];
-/// assert_eq!(cells, Value::Cells(vec![Cell::Cell(0x2), Cell::Ref("gic".to_string())]));
+/// assert_eq!(cells, [Value::Cells(vec![Cell::Cell(0x2), Cell::Ref("gic".to_string())])]);
 /// ```
 #[macro_export]
 macro_rules! cells {
@@ -83,21 +146,21 @@ macro_rules! cells {
             $(
                 temp_vec.push($x.into());
             )*
-            Value::Cells(temp_vec)
+            vec![Value::Cells(temp_vec)]
         }
     };
 }
 
-/// A helper to convert a list of string to raw bytes.
+/// A helper to convert a list of strings to raw byte string.
 ///
-/// Examples
+/// # Examples
 ///
 /// ```
 /// use vmm_fdt::{strings, Value};
 ///
 /// let bytes = strings!["ab", "c"];
 ///
-/// match bytes {
+/// match &bytes[0] {
 ///     Value::Bytes(b) => {
 ///         assert_eq!(b[0], 0x61);
 ///         assert_eq!(b[2], 0x0);
@@ -117,7 +180,7 @@ macro_rules! strings {
                 temp_vec.extend($x.as_bytes());
                 temp_vec.push(0);
             )*
-            Value::Bytes(temp_vec)
+            vec![Value::Bytes(temp_vec)]
         }
     };
 }
@@ -152,7 +215,7 @@ struct ReserveEntry {
 #[derive(Debug)]
 struct Property {
     name: u32,
-    value: Value,
+    value: Vec<Value>,
 }
 
 #[derive(Debug)]
@@ -181,11 +244,11 @@ impl Node {
         self.set_property(name, cells![phandle]);
     }
 
-    fn set_property(&mut self, name: u32, value: Value) {
+    fn set_property(&mut self, name: u32, value: Vec<Value>) {
         self.properties.push(Property { name, value })
     }
 
-    fn get_property(&self, name: u32) -> Result<Value> {
+    fn get_property(&self, name: u32) -> Result<Vec<Value>> {
         for p in self.properties.iter() {
             if p.name == name {
                 return Ok(p.value.clone());
@@ -326,7 +389,7 @@ impl DeviceTree {
     }
 
     /// Insert a propery to the device tree node.
-    pub fn set_property(&mut self, node: NodeHandle, p: &str, v: Value) -> Result<()> {
+    pub fn set_property(&mut self, node: NodeHandle, p: &str, v: Vec<Value>) -> Result<()> {
         if !self.node_exist(node) {
             return Err(Error::NoSuchNode);
         }
@@ -337,7 +400,7 @@ impl DeviceTree {
     }
 
     /// Returns the value of a node's property.
-    pub fn get_property(&self, node: NodeHandle, p: &str) -> Result<Value> {
+    pub fn get_property(&self, node: NodeHandle, p: &str) -> Result<Vec<Value>> {
         if !self.node_exist(node) {
             return Err(Error::NoSuchNode);
         }
@@ -444,25 +507,30 @@ impl DeviceTree {
         // write the properties
         for prop in &node.properties {
             buffer.write(&u32::to_be_bytes(FDT_PROP))?;
-            buffer.write(&u32::to_be_bytes(match &prop.value {
-                Value::Cells(c) => c.len() as u32 * 4,
-                Value::Bytes(b) => b.len() as u32,
-            }))?;
+            buffer.write(&u32::to_be_bytes(prop.value.iter().fold(0, |s, v| {
+                s + match v {
+                    Value::Cells(c) => c.len() as u32 * 4,
+                    Value::Bytes(b) => b.len() as u32,
+                }
+            })))?;
             buffer.write(&u32::to_be_bytes(*str_offset.get(&prop.name).unwrap()))?;
 
-            match &prop.value {
-                Value::Cells(v) => {
-                    for cell in v {
-                        buffer.write(&u32::to_be_bytes(match cell {
-                            Cell::Cell(c) => *c,
-                            Cell::Ref(r) => self.get_phandle(r).unwrap(),
-                        }))?;
+            for v in &prop.value {
+                match v {
+                    Value::Cells(v) => {
+                        for cell in v {
+                            buffer.write(&u32::to_be_bytes(match cell {
+                                Cell::Cell(c) => *c,
+                                Cell::Ref(r) => self.get_phandle(r).unwrap(),
+                            }))?;
+                        }
                     }
-                }
-                Value::Bytes(v) => {
-                    buffer.write(v.as_ref())?;
-                }
-            };
+                    Value::Bytes(v) => {
+                        buffer.write(v.as_ref())?;
+                    }
+                };
+            }
+
             align_to(buffer, 4)?;
         }
 
