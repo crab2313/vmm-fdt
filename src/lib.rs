@@ -7,6 +7,7 @@ use generational_arena::{Arena, Index};
 
 use std::io::prelude::*;
 use std::io::SeekFrom;
+use std::convert::{TryInto, TryFrom};
 
 /// Core error type used in this crate.
 #[derive(Debug)]
@@ -17,6 +18,14 @@ pub enum Error {
     NoSuchProperty,
     /// The identification is used by another node already.
     IdentConflict,
+    /// The value of the specified property is invalid.
+    InvalidProperty,
+    /// The size of `Values` do not meet the requirement.
+    SizeMismatch,
+    /// There is a `Cell::Ref` exist in the `Values`.
+    RefExist,
+    /// `#address-cells` property of a node is invalid.
+    InvalidAddressCells,
     /// A wrapper of std::io::Error.
     IoError(std::io::Error),
 }
@@ -53,6 +62,102 @@ pub enum Value {
     Bytes(Vec<u8>),
 }
 
+/// The value of a node's property.
+///
+/// [Values][5] is just a newtype wrapper of Vec<[Value][1]> with several helpers.
+/// In fact, [Values][5] is a container which can hold a mix of cells, byte_string
+/// and strings. See [cells!][2], [strings!][3], [byte_string!][4] and [values!][5]
+/// for reference.
+///
+/// # Examples
+///
+/// ```
+/// use vmm_fdt::{Values, values, cells, strings, byte_string};
+///
+/// let cells = cells![0x1, 0x3, 0x4];
+/// assert_eq!(cells.len(), 12);
+/// assert_eq!(cells.first_u32().unwrap(), 0x1);
+/// assert_eq!(cells.first_u64().unwrap(), 0x1_0000_0003);
+///
+/// let bytes = cells.to_bytes().unwrap();
+/// assert_eq!(bytes[3], 0x1);
+///
+/// let ref_cells = cells![0x1, 0x3, 0x4, "ref"];
+/// assert!(ref_cells.first_u32().is_err());
+/// ```
+///
+/// [1]: enum.Value.html
+/// [2]: macro.cells.html
+/// [3]: macro.strings.html
+/// [4]: macro.byte_string.html
+/// [5]: macro.values.html
+/// [6]: struct.Values.html
+#[derive(Debug, Clone, PartialEq)]
+pub struct Values(pub Vec<Value>);
+
+impl Values {
+    /// Return the length in bytes.
+    pub fn len(&self) -> usize {
+        self.0.iter().fold(0, |s, v| {
+            s + match v {
+                Value::Cells(c) => c.len() * 4,
+                Value::Bytes(b) => b.len(),
+            }
+        })
+    }
+
+    /// Combine the first 4 bytes to a big-endian u32
+    pub fn first_u32(&self) -> Result<u32> {
+        let bytes = self.to_bytes()?;
+        if bytes.len() < 4 {
+            return Err(Error::SizeMismatch);
+        }
+        Ok(u32::from_be_bytes(bytes[0..4].try_into().unwrap()))
+    }
+
+    /// Combine the first 8 bytes as a big-endian u64
+    pub fn first_u64(&self) -> Result<u64> {
+        let bytes = self.to_bytes()?;
+        if bytes.len() < 8 {
+            return Err(Error::SizeMismatch);
+        }
+        Ok(u64::from_be_bytes(bytes[0..8].try_into().unwrap()))
+    }
+
+    /// Convert the `Values` to a byte array. The method will return Error::RefExist
+    /// when there is a Cell::Ref inside the `Values`.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let mut bytes = vec![];
+        for v in &self.0 {
+            match v {
+                Value::Cells(cs) => {
+                    for c in cs {
+                        match c {
+                            Cell::Ref(_) => return Err(Error::RefExist),
+                            Cell::Cell(c) => bytes.extend(&c.to_be_bytes()),
+                        }
+                    }
+                }
+                Value::Bytes(bs) => {
+                    bytes.extend(bs);
+                }
+            }
+        }
+        Ok(bytes)
+    }
+}
+
+impl TryFrom<&Values> for u32 {
+    type Error = Error;
+
+    fn try_from(v: &Values) -> Result<u32> {
+        if v.len() != 4 {
+            return Err(Error::SizeMismatch);
+        }
+        v.first_u32()
+    }
+}
+
 impl From<u32> for Cell {
     fn from(cell: u32) -> Cell {
         Cell::Cell(cell)
@@ -87,12 +192,12 @@ impl From<&str> for Value {
 macro_rules! values {
     [ $( $x:expr ),* ] => {
         {
-            use $crate::Value;
+            use $crate::{Value, Values};
             let mut temp_vec: Vec<Value> = vec![];
             $(
-                temp_vec.append(&mut $x);
+                temp_vec.append(&mut $x.0);
             )*
-            temp_vec
+            Values(temp_vec)
         }
     };
 }
@@ -106,7 +211,7 @@ macro_rules! values {
 ///
 /// let bytes = byte_string![0x22, 0x5, 0x6];
 ///
-/// match &bytes[0] {
+/// match &bytes.0[0] {
 ///     Value::Bytes(b) => {
 ///         assert_eq!(b.len(), 3);
 ///         assert_eq!(b[2], 0x6);
@@ -118,12 +223,12 @@ macro_rules! values {
 macro_rules! byte_string {
     [ $( $x:expr ),* ] => {
         {
-            use $crate::Value;
+            use $crate::{Value, Values};
             let mut temp_vec: Vec<u8> = Vec::new();
             $(
                 temp_vec.push($x);
             )*
-            vec![Value::Bytes(temp_vec)]
+            Values(vec![Value::Bytes(temp_vec)])
         }
     };
 }
@@ -135,18 +240,18 @@ macro_rules! byte_string {
 /// use vmm_fdt::{cells, Cell, Value};
 ///
 /// let cells = cells![0x2, "gic"];
-/// assert_eq!(cells, [Value::Cells(vec![Cell::Cell(0x2), Cell::Ref("gic".to_string())])]);
+/// assert_eq!(cells.0, [Value::Cells(vec![Cell::Cell(0x2), Cell::Ref("gic".to_string())])]);
 /// ```
 #[macro_export]
 macro_rules! cells {
     [ $( $x:expr ),* ] => {
         {
-            use $crate::{Value, Cell};
+            use $crate::{Value, Cell, Values};
             let mut temp_vec: Vec<Cell> = Vec::new();
             $(
                 temp_vec.push($x.into());
             )*
-            vec![Value::Cells(temp_vec)]
+            Values(vec![Value::Cells(temp_vec)])
         }
     };
 }
@@ -160,7 +265,7 @@ macro_rules! cells {
 ///
 /// let bytes = strings!["ab", "c"];
 ///
-/// match &bytes[0] {
+/// match &bytes.0[0] {
 ///     Value::Bytes(b) => {
 ///         assert_eq!(b[0], 0x61);
 ///         assert_eq!(b[2], 0x0);
@@ -174,13 +279,13 @@ macro_rules! cells {
 macro_rules! strings {
     [ $( $x:expr ),* ] => {
         {
-            use $crate::Value;
+            use $crate::{Value, Values};
             let mut temp_vec: Vec<u8> = Vec::new();
             $(
                 temp_vec.extend($x.as_bytes());
                 temp_vec.push(0);
             )*
-            vec![Value::Bytes(temp_vec)]
+            Values(vec![Value::Bytes(temp_vec)])
         }
     };
 }
@@ -215,7 +320,7 @@ struct ReserveEntry {
 #[derive(Debug)]
 struct Property {
     name: u32,
-    value: Vec<Value>,
+    values: Values,
 }
 
 #[derive(Debug)]
@@ -224,6 +329,10 @@ struct Node {
     ident: Option<String>,
     properties: Vec<Property>,
     subnodes: Vec<Index>,
+
+    parent: Option<Index>,
+    adderss_cells: u32,
+    size_cells: u32,
 }
 
 impl Node {
@@ -233,6 +342,9 @@ impl Node {
             ident: None,
             properties: vec![],
             subnodes: vec![],
+            parent: None,
+            adderss_cells: 2,
+            size_cells: 1,
         }
     }
 
@@ -244,17 +356,36 @@ impl Node {
         self.set_property(name, cells![phandle]);
     }
 
-    fn set_property(&mut self, name: u32, value: Vec<Value>) {
-        self.properties.push(Property { name, value })
+    fn set_property(&mut self, name: u32, values: Values) {
+        // handle property overwrite
+        for p in self.properties.iter_mut() {
+            if p.name == name {
+                p.values = values;
+                return;
+            }
+        }
+        self.properties.push(Property { name, values })
     }
 
-    fn get_property(&self, name: u32) -> Result<Vec<Value>> {
+    fn get_property(&self, name: u32) -> Result<Values> {
         for p in self.properties.iter() {
             if p.name == name {
-                return Ok(p.value.clone());
+                return Ok(p.values.clone());
             }
         }
         Err(Error::NoSuchProperty)
+    }
+
+    fn set_address_cells(&mut self, cells: u32) {
+        self.adderss_cells = cells;
+    }
+
+    fn address_cells(&self) -> u32 {
+        self.adderss_cells
+    }
+
+    fn set_size_cells(&mut self, cells: u32) {
+        self.size_cells = cells;
     }
 }
 
@@ -316,7 +447,9 @@ impl DeviceTree {
             return Err(Error::NoSuchNode);
         }
 
-        let index = arena.insert(Node::new(name));
+        let mut node = Node::new(name);
+        node.parent = Some(parent.0);
+        let index = arena.insert(node);
         let pn = arena.get_mut(parent.0).ok_or(Error::NoSuchNode)?;
 
         pn.subnodes.push(index);
@@ -389,18 +522,55 @@ impl DeviceTree {
     }
 
     /// Insert a propery to the device tree node.
-    pub fn set_property(&mut self, node: NodeHandle, p: &str, v: Vec<Value>) -> Result<()> {
+    pub fn set_property(&mut self, node: NodeHandle, p: &str, v: Values) -> Result<()> {
         if !self.node_exist(node) {
             return Err(Error::NoSuchNode);
         }
         let strid = self.alloc_strid(p);
         let node = self.arena.get_mut(node.0).ok_or(Error::NoSuchNode)?;
+
+        if p == "#address-cells" || p == "#size-cells" {
+            let size = u32::try_from(&v)?;
+            if p == "#address-cells" {
+                node.set_address_cells(size);
+            } else {
+                node.set_size_cells(size);
+            }
+        }
+
         node.set_property(strid, v);
         Ok(())
     }
 
+    /// Return a node's name. The name will be extended as `name@address` when
+    /// `reg` is exist as a property of the node.
+    pub fn node_name(&self, node: NodeHandle) -> Result<String> {
+        if !self.node_exist(node) {
+            return Err(Error::NoSuchNode);
+        }
+
+        let reg = self.get_property(node, "reg");
+        let node = self.arena.get(node.0).ok_or(Error::NoSuchNode)?;
+
+        if let (Ok(reg), Some(parent)) = (reg, node.parent) {
+            let size = self
+                .arena
+                .get(parent)
+                .ok_or(Error::NoSuchNode)?
+                .address_cells();
+            let addr = match size {
+                1 => reg.first_u32()? as u64,
+                2 => reg.first_u64()?,
+                _ => return Err(Error::InvalidAddressCells),
+            };
+            return Ok(format!("{}@{:x}", node.name, addr));
+        }
+
+        Ok(node.name.clone())
+    }
+
     /// Returns the value of a node's property.
-    pub fn get_property(&self, node: NodeHandle, p: &str) -> Result<Vec<Value>> {
+    pub fn get_property(&self, node: NodeHandle, p: &str) -> Result<Values> {
         if !self.node_exist(node) {
             return Err(Error::NoSuchNode);
         }
@@ -497,25 +667,21 @@ impl DeviceTree {
         str_offset: &HashMap<u32, u32>,
     ) -> Result<()> {
         assert_eq!(buffer.seek(SeekFrom::Current(0))? & 0x3, 0);
+        let name = self.node_name(node)?;
         let node = self.arena.get(node.0).ok_or(Error::NoSuchNode)?;
 
         buffer.write(&u32::to_be_bytes(FDT_BEGIN_NODE))?;
-        buffer.write(node.name.as_bytes())?;
+        buffer.write(name.as_bytes())?;
         buffer.write(&[0x0])?; // null terminator of the string
         align_to(buffer, 4)?;
 
         // write the properties
         for prop in &node.properties {
             buffer.write(&u32::to_be_bytes(FDT_PROP))?;
-            buffer.write(&u32::to_be_bytes(prop.value.iter().fold(0, |s, v| {
-                s + match v {
-                    Value::Cells(c) => c.len() as u32 * 4,
-                    Value::Bytes(b) => b.len() as u32,
-                }
-            })))?;
+            buffer.write(&u32::to_be_bytes(prop.values.len() as u32))?;
             buffer.write(&u32::to_be_bytes(*str_offset.get(&prop.name).unwrap()))?;
 
-            for v in &prop.value {
+            for v in &prop.values.0 {
                 match v {
                     Value::Cells(v) => {
                         for cell in v {
@@ -570,19 +736,42 @@ mod tests {
         let root = tree.root();
         let node = tree.alloc_node(root, "cpus").unwrap();
         tree.set_ident(node, "controller").unwrap();
-        tree.set_property(node, "#address-cell", cells![0x2])
+        tree.set_property(node, "#address-cells", cells![0x2])
             .unwrap();
 
         assert!(tree.get_property(node, "no-exist").is_err());
         assert_eq!(
-            tree.get_property(node, "#address-cell").unwrap(),
+            tree.get_property(node, "#address-cells").unwrap(),
             cells![0x2]
+        );
+
+        tree.set_property(node, "#address-cells", cells![0x1])
+            .unwrap();
+        assert_eq!(
+            tree.get_property(node, "#address-cells").unwrap(),
+            cells![0x1]
         );
 
         assert!(tree.set_ident(node, "controller").is_err());
 
         tree.set_boot_cpuid(0x101);
         assert_eq!(tree.boot_cpuid(), 0x101);
+    }
+
+    #[test]
+    fn auto_naming() {
+        let mut tree = DeviceTree::new();
+        let root = tree.root();
+        let node = tree.alloc_node(root, "test").unwrap();
+        tree.set_property(root, "#address-cells", cells![0x2])
+            .unwrap();
+
+        tree.set_property(node, "reg", cells![0x2, 0x1000_0000])
+            .unwrap();
+        assert_eq!(tree.node_name(node).unwrap(), "test@210000000");
+
+        tree.set_property(node, "reg", cells![0x2]).unwrap();
+        assert!(tree.node_name(node).is_err());
     }
 
     #[test]
