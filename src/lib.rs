@@ -1,6 +1,7 @@
 #![deny(missing_docs)]
 
-//! A simple flatten device tree (FDT) generator.
+//! A simple flatten device tree (FDT) generator. See the `examples` directory
+//! in this crate for a full list of examples.
 
 use generational_arena::{Arena, Index};
 
@@ -16,7 +17,7 @@ pub enum Error {
     NoSuchProperty,
     /// The identification is used by another node already.
     IdentConflict,
-    /// A wrapper of std::io::Error
+    /// A wrapper of std::io::Error.
     IoError(std::io::Error),
 }
 
@@ -29,16 +30,21 @@ impl From<std::io::Error> for Error {
 /// Result type wrapper for this crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Representation of a single cell in a property.
+/// A single 32-bit cell in a property's value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cell {
-    /// A reference to an identification.
+    /// A reference to an ident. See [set_ident][1]. It will be replaced with
+    /// the referenced node's `phandle` which is also a 32-bit integer cell when
+    /// we generate the devicetree blobs.
+    ///
+    /// [1]: struct.DeviceTree.html#method.set_ident
     Ref(String),
     /// A single 32-bit cell.
     Cell(u32),
 }
 
-/// Representation of the value from a property
+/// A single unit of a property's value. Can be a bytestring, a string or
+/// an array of 32-bit integer cells.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     /// A list of 32-bit cells.
@@ -119,7 +125,7 @@ macro_rules! strings {
 type Phandle = u32;
 use std::collections::HashMap;
 
-/// A representation of device tree.
+/// A in-memory device tree.
 #[derive(Debug)]
 pub struct DeviceTree {
     // the index of the root node
@@ -189,7 +195,13 @@ impl Node {
     }
 }
 
-/// A handle used to reference a node in the device tree.
+/// A handle used to identify a node in a [DeviceTree][1].
+///
+/// The general idea behind this type is to simplify reference management of
+/// [DeviceTree][1]. A [NodeHandle](struct.NodeHandle.html) is just an integer
+/// ID and it is only meaningful with its associated [DeviceTree][1].
+///
+/// [1]: struct.DeviceTree.html
 #[derive(Debug, Clone, Copy)]
 pub struct NodeHandle(Index);
 
@@ -451,7 +463,6 @@ impl DeviceTree {
                     buffer.write(v.as_ref())?;
                 }
             };
-
             align_to(buffer, 4)?;
         }
 
@@ -465,6 +476,7 @@ impl DeviceTree {
     }
 }
 
+// make the `buffer`'s current pointer align to the `align`.
 fn align_to<T: Seek>(buffer: &mut T, align: u64) -> Result<()> {
     let off = (!buffer.seek(SeekFrom::Current(0))? + 1) & (align - 1);
     buffer.seek(SeekFrom::Current(off as i64))?;
