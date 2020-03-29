@@ -9,6 +9,8 @@ use std::convert::{TryFrom, TryInto};
 use std::io::prelude::*;
 use std::io::SeekFrom;
 
+mod parser;
+
 /// Core error type used in this crate.
 #[derive(Debug)]
 pub enum Error {
@@ -26,6 +28,14 @@ pub enum Error {
     RefExist,
     /// `#address-cells` property of a node is invalid.
     InvalidAddressCells,
+    /// The DTB being parsed contains invalid property name.
+    InvalidPropertyName,
+    /// The DTB being parsed contains invalid string table reference.
+    InvalidStringTable,
+    /// The DTB being parsed contains invalid node name.
+    InvalidNodeName,
+    /// Invalid DTB format.
+    InvalidDtbFormat,
     /// A wrapper of std::io::Error.
     IoError(std::io::Error),
 }
@@ -38,6 +48,16 @@ impl From<std::io::Error> for Error {
 
 /// Result type wrapper for this crate.
 pub type Result<T> = std::result::Result<T, Error>;
+
+// Token type defined by specification
+#[repr(u32)]
+enum FdtToken {
+    BeginNode = 0x0000_0001,
+    EndNode = 0x0000_0002,
+    Prop = 0x0000_0003,
+    Nop = 0x0000_0004,
+    End = 0x0000_0009,
+}
 
 /// A single 32-bit cell in a property's value.
 #[derive(Debug, Clone, PartialEq)]
@@ -396,7 +416,7 @@ impl Node {
 /// ID and it is only meaningful with its associated [DeviceTree][1].
 ///
 /// [1]: struct.DeviceTree.html
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NodeHandle(Index);
 
 impl From<&Index> for NodeHandle {
@@ -421,6 +441,11 @@ impl DeviceTree {
             reserved: vec![],
             boot_cpuid: 0,
         }
+    }
+
+    /// Parse a device tree blob into [DeviceTree](struct.DeviceTree.html).
+    pub fn parse(dtb: &[u8]) -> Result<DeviceTree> {
+        parser::parse_dtb(dtb)
     }
 
     /// Add an entry in memory reservation block.
@@ -606,7 +631,7 @@ impl DeviceTree {
         let off_dt_struct = buffer.seek(SeekFrom::Current(0))? as u32;
         self.write_node(self.root(), buffer, &str_offset)?;
         align_to(buffer, 4)?;
-        buffer.write(&u32::to_be_bytes(FDT_END))?;
+        buffer.write(&u32::to_be_bytes(FdtToken::End as u32))?;
         let size_dt_struct = buffer.seek(SeekFrom::Current(0))? as u32 - off_dt_struct;
 
         // strings block generation
@@ -667,14 +692,14 @@ impl DeviceTree {
         let name = self.node_name(node)?;
         let node = self.get(node)?;
 
-        buffer.write(&u32::to_be_bytes(FDT_BEGIN_NODE))?;
+        buffer.write(&u32::to_be_bytes(FdtToken::BeginNode as u32))?;
         buffer.write(name.as_bytes())?;
         buffer.write(&[0x0])?; // null terminator of the string
         align_to(buffer, 4)?;
 
         // write the properties
         for prop in &node.properties {
-            buffer.write(&u32::to_be_bytes(FDT_PROP))?;
+            buffer.write(&u32::to_be_bytes(FdtToken::Prop as u32))?;
             buffer.write(&u32::to_be_bytes(prop.values.len() as u32))?;
             buffer.write(&u32::to_be_bytes(*str_offset.get(&prop.name).unwrap()))?;
 
@@ -702,7 +727,7 @@ impl DeviceTree {
             self.write_node(child.into(), buffer, str_offset)?;
         }
 
-        buffer.write(&u32::to_be_bytes(FDT_END_NODE))?;
+        buffer.write(&u32::to_be_bytes(FdtToken::EndNode as u32))?;
         Ok(())
     }
 }
@@ -713,14 +738,6 @@ fn align_to<T: Seek>(buffer: &mut T, align: u64) -> Result<()> {
     buffer.seek(SeekFrom::Current(off as i64))?;
     Ok(())
 }
-
-/// Token type defined by specification
-const FDT_BEGIN_NODE: u32 = 0x0000_0001;
-const FDT_END_NODE: u32 = 0x0000_0002;
-const FDT_PROP: u32 = 0x0000_0003;
-#[allow(dead_code)] // It should be used by the parser
-const FDT_NOP: u32 = 0x0000_0004;
-const FDT_END: u32 = 0x0000_0009;
 
 #[cfg(test)]
 mod tests {
