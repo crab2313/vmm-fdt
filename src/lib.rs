@@ -104,6 +104,12 @@ pub enum Value {
 ///
 /// let ref_cells = cells![0x1, 0x3, 0x4, "ref"];
 /// assert!(ref_cells.first_u32().is_err());
+///
+/// let v64 = vec![0x1_1000_0000u64, 0x30_1000_0000u64];
+/// let values: Values = v64.into();
+/// let bytes = values.to_bytes().unwrap();
+/// assert_eq!(bytes[3], 0x1);
+/// assert_eq!(bytes[11], 0x30);
 /// ```
 ///
 /// [1]: enum.Value.html
@@ -164,6 +170,19 @@ impl Values {
             }
         }
         Ok(bytes)
+    }
+}
+
+impl From<Vec<u64>> for Values {
+    fn from(vec: Vec<u64>) -> Values {
+        let mut cells = vec![];
+
+        for v in vec {
+            cells.push(Cell::Cell((v >> 32) as u32));
+            cells.push(Cell::Cell(v as u32));
+        }
+
+        Values(vec![Value::Cells(cells)])
     }
 }
 
