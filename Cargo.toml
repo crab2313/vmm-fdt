@@ -5,5 +5,5 @@ authors = ["Qiu Wenbo <qiuwenbo@phytium.com.cn>"]
 edition = "2018"
 
 [dependencies]
-generational-arena = "0.2.7"
+generational-arena = "0.2"
 nom = "5"
