@@ -1,0 +1,10 @@
+# TODO
+
+- [x] Generate a device tree blob (DTB) from the hand drafted `DeviceTree`.
+- [ ] Generate DTB from a list of device. The definition of `devices` is some common virtual device model or something else which can be used by several VM implementation.
+- [x] DTB format parsing.
+- [ ] Support manipulate a device node in an existing tree.
+- [ ] Support iterate all node in the device tree. That is, iterator support.
+- [x] Implement a general macro to handle the case which strings! and cells! are mixed.
+- [x] Append the reg property's address to the node's name as spec said.
+- [ ] better error handling, exposing meaningful message to the library user 
